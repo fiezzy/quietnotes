@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+*.xcuserstate
+
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
+# Audio test artifacts
+*.wav
+*.m4a
+
+# Env
+.env
+.env.local
+*.local
