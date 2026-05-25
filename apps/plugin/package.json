@@ -1,0 +1,19 @@
+{
+  "name": "quietnotes-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obsidian plugin for the quietnotes local meeting notetaker.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^5.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.5.0",
+    "typescript": "^5.5.0"
+  }
+}

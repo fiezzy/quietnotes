@@ -1,0 +1,10 @@
+{
+  "id": "quietnotes",
+  "name": "quietnotes",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Local-only meeting notetaker: record audio, transcribe with mlx-whisper, summarise with Ollama, write a markdown note. Nothing leaves your Mac.",
+  "author": "Maksim Zhers",
+  "authorUrl": "https://github.com/fiezzy/quietnotes",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy this file to dev.config.json (gitignored) and edit. Used as defaults when running sidecar.py directly. In production the Obsidian plugin passes these via CLI flags instead.",
+  "vault": "/Users/YOU/Documents/Your Obsidian Vault",
+  "subfolder": "Meetings",
+  "language": "ru",
+  "whisper_model": "mlx-community/whisper-medium-mlx",
+  "ollama_model": "gemma3:4b"
+}

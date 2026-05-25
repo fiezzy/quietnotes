@@ -7,6 +7,10 @@
 .swiftpm/
 *.xcodeproj
 
+# Editors
+.vscode/
+.idea/
+
 # Node
 node_modules/
 dist/
@@ -22,7 +26,8 @@ __pycache__/
 *.wav
 *.m4a
 
-# Env
+# Env / local configs (personal paths, vault locations)
 .env
 .env.local
 *.local
+apps/sidecar/dev.config.json
