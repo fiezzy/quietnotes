@@ -26,6 +26,8 @@ __pycache__/
 *.wav
 *.m4a
 
+docs/
+
 # Env / local configs (personal paths, vault locations)
 .env
 .env.local

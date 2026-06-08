@@ -16,7 +16,8 @@ def write_markdown(
     subfolder: str = "Meetings",
     recorded_at: datetime | None = None,
     whisper_model: str | None = None,
-    ollama_model: str | None = None,
+    summarizer: str | None = None,
+    summarizer_model: str | None = None,
 ) -> Path:
     """Write a structured meeting note under `<vault>/<subfolder>/`.
 
@@ -43,8 +44,13 @@ def write_markdown(
         fm_lines.append(f"duration_seconds: {duration:.1f}")
     if whisper_model:
         fm_lines.append(f"whisper_model: {whisper_model}")
-    if ollama_model:
-        fm_lines.append(f"ollama_model: {ollama_model}")
+    if summarizer:
+        fm_lines.append(f"summarizer: {summarizer}")
+        # Backward-compat: existing Dataview queries key off `ollama_model`.
+        if summarizer == "ollama" and summarizer_model:
+            fm_lines.append(f"ollama_model: {summarizer_model}")
+    if summarizer_model:
+        fm_lines.append(f"summarizer_model: {summarizer_model}")
     if wav := result.get("wav_path"):
         fm_lines.append(f"source_audio: {wav}")
     fm_lines.append("tags: [meeting, quietnotes]")
@@ -57,7 +63,13 @@ def write_markdown(
     kp_block = "\n".join(f"- {p}" for p in key_points) if key_points else "_(none)_"
 
     tasks = result.get("tasks", [])
-    tasks_block = "\n".join(f"- [ ] {t}" for t in tasks) if tasks else "_(none)_"
+    tasks_block = "\n".join(_render_task(t) for t in tasks) if tasks else "_(none)_"
+
+    decisions = result.get("decisions", [])
+    decisions_section = ""
+    if decisions:
+        decisions_block = "\n".join(f"- {d}" for d in decisions)
+        decisions_section = f"\n## Decisions\n\n{decisions_block}\n"
 
     transcript = (result.get("transcript") or "").strip() or "_(empty)_"
 
@@ -76,7 +88,7 @@ def write_markdown(
 ## Tasks
 
 {tasks_block}
-
+{decisions_section}
 ## Transcript
 
 <details>
@@ -90,6 +102,22 @@ def write_markdown(
     target.write_text(md, encoding="utf-8")
     print(f"[output] wrote {target}", file=sys.stderr)
     return target
+
+
+def _render_task(task: Any) -> str:
+    """Render one task as a checklist line. Accepts a {title, owner, due} dict
+    or a plain string (legacy / defensive)."""
+    if isinstance(task, str):
+        return f"- [ ] {task}"
+    title = str(task.get("title", "")).strip()
+    line = f"- [ ] {title}"
+    owner = task.get("owner")
+    if owner:
+        line += f" — **{owner}**"
+    due = task.get("due")
+    if due:
+        line += f" _({due})_"
+    return line
 
 
 def wav_duration(path: Path) -> float | None:

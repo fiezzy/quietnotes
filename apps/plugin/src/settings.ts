@@ -1,6 +1,8 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import type QuietnotesPlugin from "./main";
 
+export type SummarizerProvider = "ollama" | "claude" | "codex" | "custom";
+
 export interface QuietnotesSettings {
   outputSubfolder: string;
   filenamePattern: string;
@@ -9,9 +11,14 @@ export interface QuietnotesSettings {
   audioStoragePath: string;
 
   whisperModel: string;
+  language: string; // "" = auto, or ISO code like "ru"
+
+  // Summarizer backend.
+  summarizer: SummarizerProvider;
   ollamaUrl: string;
   ollamaModel: string;
-  language: string; // "" = auto, or ISO code like "ru"
+  summarizerModel: string; // model for claude/codex ("" = CLI default)
+  summarizerCommand: string; // path/command for claude|codex|custom ("" = resolve on PATH)
 
   customSystemPrompt: string;
   showStatusBar: boolean;
@@ -24,12 +31,22 @@ export const DEFAULT_SETTINGS: QuietnotesSettings = {
   keepAudio: false,
   audioStoragePath: "Meetings/attachments",
   whisperModel: "mlx-community/whisper-medium-mlx",
+  language: "",
+  summarizer: "ollama",
   ollamaUrl: "http://localhost:11434",
   ollamaModel: "gemma3:4b",
-  language: "",
+  summarizerModel: "",
+  summarizerCommand: "",
   customSystemPrompt: "",
   showStatusBar: true,
   autoOpenNote: false,
+};
+
+const SUMMARIZER_LABELS: Record<SummarizerProvider, string> = {
+  ollama: "Ollama (local)",
+  claude: "Claude Code (claude)",
+  codex: "Codex (codex)",
+  custom: "Custom command",
 };
 
 const LANGUAGE_OPTIONS: Record<string, string> = {
@@ -107,7 +124,7 @@ export class QuietnotesSettingTab extends PluginSettingTab {
         );
     }
 
-    containerEl.createEl("h2", { text: "AI models" });
+    containerEl.createEl("h2", { text: "Transcription" });
 
     new Setting(containerEl)
       .setName("Whisper model")
@@ -116,36 +133,6 @@ export class QuietnotesSettingTab extends PluginSettingTab {
         t.setValue(this.plugin.settings.whisperModel).onChange(async (v) => {
           this.plugin.settings.whisperModel = v.trim() || DEFAULT_SETTINGS.whisperModel;
           await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Ollama URL")
-      .setDesc("Default http://localhost:11434.")
-      .addText((t) =>
-        t.setValue(this.plugin.settings.ollamaUrl).onChange(async (v) => {
-          this.plugin.settings.ollamaUrl = v.trim() || DEFAULT_SETTINGS.ollamaUrl;
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Ollama model")
-      .setDesc("Click Refresh to pull the installed model list from Ollama.")
-      .addText((t) =>
-        t.setValue(this.plugin.settings.ollamaModel).onChange(async (v) => {
-          this.plugin.settings.ollamaModel = v.trim() || DEFAULT_SETTINGS.ollamaModel;
-          await this.plugin.saveSettings();
-        }),
-      )
-      .addButton((b) =>
-        b.setButtonText("Refresh").onClick(async () => {
-          const models = await fetchOllamaModels(this.plugin.settings.ollamaUrl);
-          if (models.length === 0) {
-            new Notice("Ollama unreachable or has no models");
-          } else {
-            new Notice(`Found: ${models.join(", ")}`);
-          }
         }),
       );
 
@@ -161,6 +148,8 @@ export class QuietnotesSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    this.renderSummarizerSection(containerEl);
 
     containerEl.createEl("h2", { text: "Advanced" });
 
@@ -195,6 +184,162 @@ export class QuietnotesSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }),
       );
+  }
+
+  private renderSummarizerSection(containerEl: HTMLElement): void {
+    const s = this.plugin.settings;
+    containerEl.createEl("h2", { text: "Summarizer" });
+
+    new Setting(containerEl)
+      .setName("Backend")
+      .setDesc("How transcripts are turned into the summary and tasks.")
+      .addDropdown((d) => {
+        for (const [value, label] of Object.entries(SUMMARIZER_LABELS)) {
+          d.addOption(value, label);
+        }
+        d.setValue(s.summarizer).onChange(async (v) => {
+          s.summarizer = v as SummarizerProvider;
+          await this.plugin.saveSettings();
+          this.display(); // re-render conditional fields + privacy notice
+        });
+      });
+
+    if (s.summarizer !== "ollama") {
+      const warn = containerEl.createDiv({ cls: "setting-item-description" });
+      warn.style.color = "var(--text-error)";
+      warn.style.padding = "0 0 0.75em 0";
+      warn.setText(
+        "⚠️ This backend sends the transcript to an external service. quietnotes' local-only privacy guarantee applies to the Ollama backend only.",
+      );
+    }
+
+    if (s.summarizer === "ollama") {
+      new Setting(containerEl)
+        .setName("Ollama URL")
+        .setDesc("Default http://localhost:11434.")
+        .addText((t) =>
+          t.setValue(s.ollamaUrl).onChange(async (v) => {
+            s.ollamaUrl = v.trim() || DEFAULT_SETTINGS.ollamaUrl;
+            await this.plugin.saveSettings();
+          }),
+        );
+
+      new Setting(containerEl)
+        .setName("Ollama model")
+        .setDesc("Click Refresh to pull the installed model list from Ollama.")
+        .addText((t) =>
+          t.setValue(s.ollamaModel).onChange(async (v) => {
+            s.ollamaModel = v.trim() || DEFAULT_SETTINGS.ollamaModel;
+            await this.plugin.saveSettings();
+          }),
+        )
+        .addButton((b) =>
+          b.setButtonText("Refresh").onClick(async () => {
+            const models = await fetchOllamaModels(s.ollamaUrl);
+            new Notice(
+              models.length === 0 ? "Ollama unreachable or has no models" : `Found: ${models.join(", ")}`,
+            );
+          }),
+        );
+    } else if (s.summarizer === "claude" || s.summarizer === "codex") {
+      const bin = s.summarizer === "claude" ? "claude" : "codex";
+      new Setting(containerEl)
+        .setName("Command / path")
+        .setDesc(`Path to the ${bin} executable. Leave empty to resolve "${bin}" on PATH.`)
+        .addText((t) =>
+          t
+            .setPlaceholder(bin)
+            .setValue(s.summarizerCommand)
+            .onChange(async (v) => {
+              s.summarizerCommand = v.trim();
+              await this.plugin.saveSettings();
+            }),
+        )
+        .addButton((b) =>
+          b.setButtonText("Detect").onClick(() => this.runDetect()),
+        );
+
+      new Setting(containerEl)
+        .setName("Model")
+        .setDesc(`Optional. Leave empty to use ${bin}'s default model.`)
+        .addText((t) =>
+          t.setValue(s.summarizerModel).onChange(async (v) => {
+            s.summarizerModel = v.trim();
+            await this.plugin.saveSettings();
+          }),
+        );
+    } else if (s.summarizer === "custom") {
+      new Setting(containerEl)
+        .setName("Command")
+        .setDesc(
+          "Your command receives the prompt + transcript on stdin and must print the answer (JSON, optionally with surrounding prose) on stdout.",
+        )
+        .addTextArea((t) => {
+          t.setPlaceholder("my-llm --json")
+            .setValue(s.summarizerCommand)
+            .onChange(async (v) => {
+              s.summarizerCommand = v.trim();
+              await this.plugin.saveSettings();
+            });
+          t.inputEl.rows = 2;
+          t.inputEl.style.width = "100%";
+        });
+    }
+
+    new Setting(containerEl)
+      .setName("Test summarizer")
+      .setDesc("Run a short canned transcript through the selected backend to verify it works.")
+      .addButton((b) =>
+        b
+          .setButtonText("Test")
+          .setCta()
+          .onClick(() => this.runSummarizerTest()),
+      );
+  }
+
+  private async runDetect(): Promise<void> {
+    const s = this.plugin.settings;
+    try {
+      const r = await this.plugin.runSidecarRPC<{
+        available: boolean;
+        path: string;
+        version: string;
+        error?: string;
+      }>("probe_summarizer", { provider: s.summarizer, command: s.summarizerCommand });
+      if (r.available) {
+        new Notice(`✓ Found ${s.summarizer} at ${r.path}${r.version ? ` (${r.version})` : ""}`);
+      } else {
+        new Notice(`✗ Not found: ${r.error ?? "unknown"}`);
+      }
+    } catch (e) {
+      new Notice(`Detect failed: ${(e as { message?: string }).message ?? String(e)}`);
+    }
+  }
+
+  private async runSummarizerTest(): Promise<void> {
+    const s = this.plugin.settings;
+    new Notice(`Testing ${s.summarizer}…`);
+    try {
+      const r = await this.plugin.runSidecarRPC<{
+        tldr: string;
+        key_points: string[];
+        decisions: string[];
+        tasks: { title: string; owner: string | null; due: string | null }[];
+      }>("test_summarizer", {
+        summarizer: s.summarizer,
+        summarizer_model: s.summarizerModel,
+        summarizer_command: s.summarizerCommand,
+        ollama_model: s.ollamaModel,
+        ollama_url: s.ollamaUrl,
+      });
+      new Notice(
+        `✓ ${s.summarizer} works.\nTL;DR: ${r.tldr}\n${r.key_points.length} key points, ${r.tasks.length} tasks.`,
+        10000,
+      );
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      new Notice(`✗ Test failed (${err.code ?? "error"}): ${err.message ?? String(e)}`, 10000);
+    }
   }
 }
 

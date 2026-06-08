@@ -18,6 +18,35 @@ export function classifyError(code: string, message: string): FriendlyError {
         hint: "Make sure Ollama is running, then click Retry.",
         retryable: true,
       };
+    case "summarizer_not_found":
+      return {
+        title: "Summarizer not found",
+        message,
+        hint: "The selected CLI (claude/codex) isn't on PATH. Open Settings → Summarizer and set its full path, or pick a different backend.",
+      };
+    case "summarizer_timeout":
+      return {
+        title: "Summarizer timed out",
+        message,
+        hint: "The agent didn't respond in time. Try again, or pick a faster model/backend.",
+        retryable: true,
+      };
+    case "summarizer_bad_output":
+      return {
+        title: "Summarizer returned unusable output",
+        message,
+        hint: "The backend didn't return valid JSON. Retry; if it persists, try another backend or model.",
+        retryable: true,
+        copyText: message,
+      };
+    case "summarizer_failed":
+      return {
+        title: "Summarizer failed",
+        message,
+        hint: "The summarization backend errored. Check the details and retry.",
+        retryable: true,
+        copyText: message,
+      };
     case "audio_capture_failed":
     case "audio_capture_hung":
       return {

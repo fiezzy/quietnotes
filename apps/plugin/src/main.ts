@@ -2,7 +2,7 @@ import { Plugin, FileSystemAdapter, Notice, Platform } from "obsidian";
 import * as path from "path";
 import { DEFAULT_SETTINGS, QuietnotesSettings, QuietnotesSettingTab } from "./settings";
 import { StateMachine, statusBarText } from "./state";
-import { SidecarClient, SidecarError } from "./sidecar-client";
+import { SidecarClient, SidecarError, SpawnOptions } from "./sidecar-client";
 import { classifyError, ErrorModal } from "./errors";
 
 // Dev-mode hardcoded paths. Task 9 (onboarding) replaces these with a bundled venv.
@@ -102,6 +102,40 @@ export default class QuietnotesPlugin extends Plugin {
     return adapter.getBasePath();
   }
 
+  private buildSpawnOptions(vaultPath: string): SpawnOptions {
+    return {
+      pythonPath: DEV_PYTHON,
+      sidecarScript: DEV_SIDECAR_SCRIPT,
+      vault: vaultPath,
+      subfolder: this.settings.outputSubfolder,
+      whisperModel: this.settings.whisperModel,
+      ollamaUrl: this.settings.ollamaUrl,
+      ollamaModel: this.settings.ollamaModel,
+      language: this.settings.language,
+      summarizer: this.settings.summarizer,
+      summarizerModel: this.settings.summarizerModel,
+      summarizerCommand: this.settings.summarizerCommand,
+      systemPrompt: this.settings.customSystemPrompt,
+    };
+  }
+
+  /**
+   * Spawn a short-lived sidecar, send one RPC, return its result, then shut
+   * down. Used by the settings tab's Detect / Test buttons. `params` overrides
+   * the current settings so the UI can probe unsaved values.
+   */
+  async runSidecarRPC<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (!Platform.isDesktop) throw { code: "desktop_only", message: "desktop-only", recoverable: false };
+    const vaultPath = this.getVaultPath() ?? "";
+    const client = new SidecarClient(this.buildSpawnOptions(vaultPath));
+    client.spawn();
+    try {
+      return await client.send<T>(method, params);
+    } finally {
+      await client.shutdown();
+    }
+  }
+
   private async startRecording(): Promise<void> {
     if (!Platform.isDesktop) {
       new Notice("quietnotes is desktop-only");
@@ -114,16 +148,7 @@ export default class QuietnotesPlugin extends Plugin {
       return;
     }
 
-    this.sidecar = new SidecarClient({
-      pythonPath: DEV_PYTHON,
-      sidecarScript: DEV_SIDECAR_SCRIPT,
-      vault: vaultPath,
-      subfolder: this.settings.outputSubfolder,
-      whisperModel: this.settings.whisperModel,
-      ollamaUrl: this.settings.ollamaUrl,
-      ollamaModel: this.settings.ollamaModel,
-      language: this.settings.language,
-    });
+    this.sidecar = new SidecarClient(this.buildSpawnOptions(vaultPath));
 
     this.sidecar.on("event", (e: { event: string; stage?: string }) => {
       if (e.event === "stage") {

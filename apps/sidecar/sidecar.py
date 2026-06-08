@@ -62,6 +62,10 @@ def run_daemon(args: argparse.Namespace) -> int:
                 _daemon_stop_and_process(args, state, msg_id, params)
             elif method == "cancel":
                 _daemon_cancel(args, state, msg_id, params)
+            elif method == "probe_summarizer":
+                _daemon_probe_summarizer(args, msg_id, params)
+            elif method == "test_summarizer":
+                _daemon_test_summarizer(args, msg_id, params)
             else:
                 _emit_error(msg_id, "unknown_method", f"unknown method: {method!r}")
         except Exception as e:  # noqa: BLE001 — daemon must not crash on a single bad request
@@ -178,7 +182,12 @@ def _daemon_stop_and_process(args: argparse.Namespace, state: dict, msg_id: str,
     tr = transcribe.transcribe(wav_path, model=args.whisper_model, language=args.language)
 
     _emit_event("stage", stage="summarizing")
-    sm = summarize.summarize(tr["text"], model=args.ollama_model)
+    try:
+        sm = summarize.summarize(tr["text"], **_summarizer_kwargs(args))
+    except summarize.SummarizerError as e:
+        _emit_error(msg_id, e.code, str(e), recoverable=e.recoverable)
+        _reset_state(state)
+        return
 
     _emit_event("stage", stage="writing")
     result = {
@@ -187,6 +196,7 @@ def _daemon_stop_and_process(args: argparse.Namespace, state: dict, msg_id: str,
         "transcript": tr.get("text", ""),
         "tldr": sm.get("tldr", ""),
         "key_points": sm.get("key_points", []),
+        "decisions": sm.get("decisions", []),
         "tasks": sm.get("tasks", []),
         "duration_seconds": output.wav_duration(wav_path),
     }
@@ -201,7 +211,8 @@ def _daemon_stop_and_process(args: argparse.Namespace, state: dict, msg_id: str,
             subfolder=args.subfolder,
             recorded_at=recorded_at,
             whisper_model=args.whisper_model,
-            ollama_model=args.ollama_model,
+            summarizer=args.summarizer,
+            summarizer_model=_summarizer_model_label(args),
         )
 
     # Cleanup temp wav.
@@ -218,9 +229,67 @@ def _daemon_stop_and_process(args: argparse.Namespace, state: dict, msg_id: str,
             "duration_seconds": result["duration_seconds"],
             "tldr": result["tldr"],
             "key_points": result["key_points"],
+            "decisions": result["decisions"],
             "tasks": result["tasks"],
         },
     })
+
+
+# Canned transcript used by the settings "Test summarizer" button.
+TEST_TRANSCRIPT = (
+    "Quick sync. Alex will fix the login bug by Tuesday. "
+    "We decided to ship the beta next week, and Maria takes the release notes."
+)
+
+
+def _summarizer_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Build kwargs for summarize.summarize() from CLI args."""
+    system_prompt = None
+    if getattr(args, "system_prompt_file", None):
+        try:
+            system_prompt = Path(args.system_prompt_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[sidecar] could not read --system-prompt-file: {e}", file=sys.stderr)
+    if args.summarizer == "ollama":
+        return {
+            "provider": "ollama",
+            "model": args.ollama_model,
+            "host": args.ollama_url,
+            "system_prompt": system_prompt,
+        }
+    return {
+        "provider": args.summarizer,
+        "model": args.summarizer_model,
+        "command": args.summarizer_command,
+        "system_prompt": system_prompt,
+    }
+
+
+def _summarizer_model_label(args: argparse.Namespace) -> str | None:
+    """The model string to record in frontmatter for the active provider."""
+    if args.summarizer == "ollama":
+        return args.ollama_model
+    return args.summarizer_model or None
+
+
+def _daemon_probe_summarizer(args: argparse.Namespace, msg_id: str, params: dict) -> None:
+    provider = params.get("provider") or args.summarizer
+    command = params.get("command", args.summarizer_command)
+    _emit({"id": msg_id, "result": summarize.probe(provider, command)})
+
+
+def _daemon_test_summarizer(args: argparse.Namespace, msg_id: str, params: dict) -> None:
+    # Allow the UI to override provider/model/command without restarting the daemon.
+    overrides = argparse.Namespace(**vars(args))
+    for key in ("summarizer", "summarizer_model", "summarizer_command", "ollama_model", "ollama_url"):
+        if key in params and params[key] is not None:
+            setattr(overrides, key, params[key])
+    try:
+        sm = summarize.summarize(TEST_TRANSCRIPT, **_summarizer_kwargs(overrides))
+    except summarize.SummarizerError as e:
+        _emit_error(msg_id, e.code, str(e), recoverable=e.recoverable)
+        return
+    _emit({"id": msg_id, "result": sm})
 
 
 def _reset_state(state: dict) -> None:
@@ -251,11 +320,11 @@ def run(
     *,
     wav_path: Path,
     whisper_model: str,
-    ollama_model: str,
     language: str | None,
+    summarizer_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     tr = transcribe.transcribe(wav_path, model=whisper_model, language=language)
-    sm = summarize.summarize(tr["text"], model=ollama_model)
+    sm = summarize.summarize(tr["text"], **summarizer_kwargs)
     return {
         "wav_path": str(wav_path),
         "language": tr.get("language"),
@@ -263,6 +332,7 @@ def run(
         "segments": tr.get("segments", []),
         "tldr": sm.get("tldr", ""),
         "key_points": sm.get("key_points", []),
+        "decisions": sm.get("decisions", []),
         "tasks": sm.get("tasks", []),
     }
 
@@ -287,7 +357,22 @@ def _print_pretty(result: dict[str, Any]) -> None:
     print("TASKS")
     if result["tasks"]:
         for t in result["tasks"]:
-            print(f"  [ ] {t}")
+            if isinstance(t, dict):
+                line = t.get("title", "")
+                if t.get("owner"):
+                    line += f" — {t['owner']}"
+                if t.get("due"):
+                    line += f" ({t['due']})"
+            else:
+                line = str(t)
+            print(f"  [ ] {line}")
+    else:
+        print("  (none)")
+    print(sep)
+    print("DECISIONS")
+    if result.get("decisions"):
+        for d in result["decisions"]:
+            print(f"  • {d}")
     else:
         print("  (none)")
     print(sep)
@@ -313,7 +398,18 @@ def main() -> int:
     ap.add_argument("--output-wav", type=Path, default=None,
                     help="Where to save the recording (default: /tmp/quietnotes-<ts>.wav)")
     ap.add_argument("--whisper-model", default=cfg.get("whisper_model", transcribe.DEFAULT_MODEL))
+    ap.add_argument("--summarizer", default=cfg.get("summarizer", summarize.DEFAULT_PROVIDER),
+                    choices=["ollama", "claude", "codex", "custom"],
+                    help="Summarizer backend. Default: ollama (local).")
+    ap.add_argument("--summarizer-model", default=cfg.get("summarizer_model", ""),
+                    help="Model for claude/codex (empty = the CLI's default).")
+    ap.add_argument("--summarizer-command", default=cfg.get("summarizer_command", ""),
+                    help="Executable path (claude/codex) or full command (custom).")
+    ap.add_argument("--system-prompt-file", default=cfg.get("system_prompt_file"),
+                    help="Path to a file whose contents override the built-in system prompt.")
     ap.add_argument("--ollama-model", default=cfg.get("ollama_model", summarize.DEFAULT_MODEL))
+    ap.add_argument("--ollama-url", default=cfg.get("ollama_url"),
+                    help="Ollama host URL, e.g. http://localhost:11434.")
     ap.add_argument("--language", default=cfg.get("language"),
                     help="Force language code (e.g. ru). Omit for auto-detect.")
     ap.add_argument("--vault", type=Path,
@@ -351,8 +447,8 @@ def main() -> int:
     result = run(
         wav_path=wav_path,
         whisper_model=args.whisper_model,
-        ollama_model=args.ollama_model,
         language=args.language,
+        summarizer_kwargs=_summarizer_kwargs(args),
     )
 
     # Decide whether the wav is ephemeral (we made it, no one asked to keep it).
@@ -377,7 +473,8 @@ def main() -> int:
             subfolder=args.subfolder,
             recorded_at=recorded_at,
             whisper_model=args.whisper_model,
-            ollama_model=args.ollama_model,
+            summarizer=args.summarizer,
+            summarizer_model=_summarizer_model_label(args),
         )
         result["md_path"] = str(md_path)
 

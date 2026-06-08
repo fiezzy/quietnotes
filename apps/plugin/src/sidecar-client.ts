@@ -1,5 +1,8 @@
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 export type StageEvent = { event: "stage"; stage: "transcribing" | "summarizing" | "writing" };
 export type SidecarEvent = StageEvent;
@@ -10,6 +13,8 @@ export interface SidecarError {
   recoverable: boolean;
 }
 
+export type SummarizerProvider = "ollama" | "claude" | "codex" | "custom";
+
 export interface SpawnOptions {
   pythonPath: string;
   sidecarScript: string;
@@ -19,6 +24,10 @@ export interface SpawnOptions {
   ollamaUrl: string;
   ollamaModel: string;
   language: string; // "" = auto
+  summarizer: SummarizerProvider;
+  summarizerModel: string; // "" = CLI default (claude/codex)
+  summarizerCommand: string; // path/command for claude|codex|custom
+  systemPrompt: string; // "" = built-in
 }
 
 interface PendingRequest {
@@ -31,6 +40,7 @@ export class SidecarClient extends EventEmitter {
   private pending = new Map<string, PendingRequest>();
   private nextId = 1;
   private stdoutBuffer = "";
+  private systemPromptFile: string | null = null;
 
   constructor(private opts: SpawnOptions) {
     super();
@@ -45,8 +55,30 @@ export class SidecarClient extends EventEmitter {
       "--vault", this.opts.vault,
       "--subfolder", this.opts.subfolder,
       "--whisper-model", this.opts.whisperModel,
+      "--summarizer", this.opts.summarizer,
       "--ollama-model", this.opts.ollamaModel,
+      "--ollama-url", this.opts.ollamaUrl,
     ];
+    if (this.opts.summarizerModel) {
+      args.push("--summarizer-model", this.opts.summarizerModel);
+    }
+    if (this.opts.summarizerCommand) {
+      args.push("--summarizer-command", this.opts.summarizerCommand);
+    }
+    if (this.opts.systemPrompt && this.opts.systemPrompt.trim()) {
+      // Long prompt text goes via a temp file, never argv.
+      this.systemPromptFile = path.join(
+        os.tmpdir(),
+        `quietnotes-prompt-${process.pid}-${this.nextId}.txt`,
+      );
+      try {
+        fs.writeFileSync(this.systemPromptFile, this.opts.systemPrompt, "utf-8");
+        args.push("--system-prompt-file", this.systemPromptFile);
+      } catch (e) {
+        console.warn("[quietnotes] could not write system prompt file", e);
+        this.systemPromptFile = null;
+      }
+    }
     if (this.opts.language) {
       args.push("--language", this.opts.language);
     }
@@ -138,6 +170,14 @@ export class SidecarClient extends EventEmitter {
   }
 
   async shutdown(): Promise<void> {
+    if (this.systemPromptFile) {
+      try {
+        fs.unlinkSync(this.systemPromptFile);
+      } catch {
+        /* best effort */
+      }
+      this.systemPromptFile = null;
+    }
     if (!this.proc) return;
     const proc = this.proc;
     proc.stdin.end();
